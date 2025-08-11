@@ -10,12 +10,12 @@ sys.path.append(str(BASE))  # чтобы видеть пакет core/
 
 from core.data_loader import DataLoader
 from core.strategy import compute_signal
-from core.llm import build_rationale  # локальный офлайн NLG (без GPT)
+from core.llm import build_rationale  # офлайн NLG (без GPT)
 
 # --- UI ---
 st.set_page_config(page_title="AI Trading — Final App", layout="wide")
 st.title("AI Trading — Final App")
-st.caption("Данные: Polygon → Yahoo → CSV. Стратегия: кастом. Описание — офлайн (без GPT) с выбором детализации.")
+st.caption("Данные: Polygon → Yahoo → CSV. Стратегия: кастом. Текст — офлайн, без раскрытия методики.")
 
 # Настройки тикеров и горизонта
 default_tickers = os.getenv("DEFAULT_TICKERS", "QQQ,AAPL,MSFT,NVDA")
@@ -26,7 +26,7 @@ h_map = {"Краткосрок":"short","Среднесрок":"swing","Долг
 horizon_ui = st.selectbox("Горизонт", list(h_map.keys()), index=1)
 horizon = h_map[horizon_ui]
 
-# Степень детализации описания (новое)
+# Степень детализации описания
 detail = st.selectbox(
     "Степень детализации описания",
     ["Коротко", "Стандарт", "Подробно"],
@@ -92,6 +92,22 @@ with colB:
 
         st.metric("Confidence", f"{sig['confidence']:.2f}")
 
+        # --- Подготовим нейтральные ориентиры (без слов pivot/R/S) ---
+        entry_px = float(sig["entry"])
+        up_candidates = [
+            sig.get("upper_zone"), sig.get("key_mark"),
+            sig.get("R1"), sig.get("R2"), sig.get("R3")
+        ]
+        down_candidates = [
+            sig.get("lower_zone"), sig.get("key_mark"),
+            sig.get("S1"), sig.get("S2"), sig.get("S3")
+        ]
+
+        ups = sorted([float(x) for x in up_candidates
+                      if isinstance(x,(int,float)) and x is not None and x > entry_px])[:2]
+        dns = sorted([float(x) for x in down_candidates
+                      if isinstance(x,(int,float)) and x is not None and x < entry_px], reverse=True)[:2]
+
         # --- График ---
         fig = go.Figure([
             go.Candlestick(
@@ -100,21 +116,20 @@ with colB:
             )
         ])
 
-        # Линии уровней (включая пивоты, если есть)
-        lines = {
+        # Обязательные линии (торговый план)
+        plan_lines = {
             "Entry": sig["entry"], "TP1": sig["tp1"], "TP2": sig["tp2"], "SL": sig["sl"],
             "Ключевая отметка": sig["key_mark"],
             "Верхняя зона": sig["upper_zone"], "Нижняя зона": sig["lower_zone"],
-            "P": sig.get("pivot_P", None), "R1": sig.get("R1", None), "R2": sig.get("R2", None), "R3": sig.get("R3", None),
-            "S1": sig.get("S1", None), "S2": sig.get("S2", None), "S3": sig.get("S3", None)
         }
         colors = {
             "Entry":"#2563eb","TP1":"#16a34a","TP2":"#16a34a","SL":"#dc2626",
             "Ключевая отметка":"#6b7280","Верхняя зона":"#f59e0b","Нижняя зона":"#10b981",
-            "P":"#9ca3af","R1":"#a78bfa","R2":"#a78bfa","R3":"#a78bfa",
-            "S1":"#f472b6","S2":"#f472b6","S3":"#f472b6"
+            "Ориентир ↑1":"#a78bfa","Ориентир ↑2":"#a78bfa",
+            "Ориентир ↓1":"#f472b6","Ориентир ↓2":"#f472b6",
         }
-        for label, y in lines.items():
+
+        for label, y in plan_lines.items():
             if y is None: 
                 continue
             fig.add_hline(
@@ -122,6 +137,24 @@ with colB:
                 line_color=colors.get(label, "#999"),
                 annotation_text=label, annotation_position="top left"
             )
+
+        # Нейтральные ориентиры вверх/вниз (без упоминания pivot)
+        if len(ups) >= 1:
+            fig.add_hline(y=ups[0], line_width=1, line_dash="dot",
+                          line_color=colors["Ориентир ↑1"], annotation_text="Ориентир ↑1",
+                          annotation_position="top left")
+        if len(ups) >= 2:
+            fig.add_hline(y=ups[1], line_width=1, line_dash="dot",
+                          line_color=colors["Ориентир ↑2"], annotation_text="Ориентир ↑2",
+                          annotation_position="top left")
+        if len(dns) >= 1:
+            fig.add_hline(y=dns[0], line_width=1, line_dash="dot",
+                          line_color=colors["Ориентир ↓1"], annotation_text="Ориентир ↓1",
+                          annotation_position="top left")
+        if len(dns) >= 2:
+            fig.add_hline(y=dns[1], line_width=1, line_dash="dot",
+                          line_color=colors["Ориентир ↓2"], annotation_text="Ориентир ↓2",
+                          annotation_position="top left")
 
         # Подсветка TP / SL зон
         try:
@@ -141,7 +174,7 @@ with colB:
         fig.update_layout(margin=dict(l=10,r=10,t=30,b=10), height=460, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
-        # --- Текстовая аналитика (офлайн) ---
+        # --- Текстовая аналитика (офлайн, без терминов методики) ---
         text = build_rationale(sig["symbol"], horizon_ui, sig, detail=detail)
         st.write(text)
 
@@ -150,4 +183,4 @@ with colB:
     else:
         st.info("Нажмите «Сгенерировать сигнал». Если Polygon/Yahoo недоступны — возьмём demo CSV.")
 
-    
+ 
