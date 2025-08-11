@@ -1,76 +1,93 @@
-# core/llm.py
+
+   # core/llm.py — офлайн NLG без упоминаний "Pivot", R1/R2/S1/S2
+from __future__ import annotations
+import random
+
+def _verbal_conf(c: float) -> str:
+    if c < 0.45: return "низкая"
+    if c < 0.7:  return "средняя"
+    return "высокая"
+
+def _dir_word(action: str) -> str:
+    return {"BUY":"покупку","SHORT":"шорт","WAIT":"ожидание","CLOSE":"закрытие"}.get(action, "ожидание")
+
+def _nearest_levels(sig: dict) -> tuple[list[float], list[float]]:
+    """Возвращает 2 ориентирa сверху и 2 снизу без ярлыков уровней."""
+    px = float(sig.get("entry", sig.get("Close", 0.0)))
+    # соберём возможные уровни (если есть), но не называем их
+    up_raw = [sig.get("R1"), sig.get("R2"), sig.get("R3"), sig.get("upper_zone"), sig.get("key_mark")]
+    dn_raw = [sig.get("S1"), sig.get("S2"), sig.get("S3"), sig.get("lower_zone"), sig.get("key_mark")]
+    ups = sorted([float(x) for x in up_raw if isinstance(x,(int,float)) and x and x > px])[:2]
+    dns = sorted([float(x) for x in dn_raw if isinstance(x,(int,float)) and x and x < px], reverse=True)[:2]
+    return ups, dns
+
+def _intro(symbol: str, action: str, src: str, horizon_ui: str) -> str:
+    starts = [
+        f"{symbol}: картина спокойная, без лишней суеты. Источник — {src.lower()}, горизонт — {horizon_ui.lower()}.",
+        f"{symbol}: рынок ведёт себя ровно; работаем по {src.lower()}, режим — {horizon_ui.lower()}.",
+        f"{symbol}: тон умеренный, без явных перегибов. Данные — {src.lower()}, горизонт — {horizon_ui.lower()}."
+    ]
+    if action in ("BUY","SHORT"):
+        starts += [
+            f"{symbol}: условия для сделки выглядят рабочими. Источник — {src}, горизонт — {horizon_ui.lower()}.",
+            f"{symbol}: есть сетап под {_dir_word(action)}. Берём котировки {src.lower()}, горизонт — {horizon_ui.lower()}."
+        ]
+    return random.choice(starts)
+
+def _plan(sig: dict) -> str:
+    return (f"План: вход {sig['entry']}, стоп {sig['sl']}, цели {sig['tp1']} / {sig['tp2']}. "
+            f"Рабочий коридор {sig['lower_zone']}–{sig['upper_zone']}, опорная отметка {sig['key_mark']}.")
+
+def _context_levels(sig: dict) -> str:
+    ups, dns = _nearest_levels(sig)
+    parts = []
+    if ups:
+        if len(ups) == 1:
+            parts.append(f"Сверху ближайший ориентир — {ups[0]:.2f}.")
+        else:
+            parts.append(f"Сверху ориентиры — {ups[0]:.2f} и {ups[1]:.2f}.")
+    if dns:
+        if len(dns) == 1:
+            parts.append(f"Снизу ближайший ориентир — {dns[0]:.2f}.")
+        else:
+            parts.append(f"Снизу ориентиры — {dns[0]:.2f} и {dns[1]:.2f}.")
+    return " ".join(parts)
+
+def _next_steps(action: str) -> str:
+    if action == "BUY":
+        return "Если цена удержится выше ближайшего сопротивления, даём ходу; при вялой реакции сокращаем риск."
+    if action == "SHORT":
+        return "Если давление сохранится у ближайшей поддержки, держим ход до второй цели; при отскоке — защищаемся."
+    if action == "CLOSE":
+        return "Логично зафиксировать результат и посмотреть на следующую расстановку сил."
+    return "Наблюдаем за реакцией у ближайших ориентиров; уверенный пробой задаст следующее движение."
+
 def build_rationale(symbol: str, horizon_ui: str, sig: dict, detail: str = "Стандарт") -> str:
     """
-    Офлайн-генерация текста по сигналу.
-    Без GPT — чисто Python, но со стилистикой "живого" анализа.
+    Локальная генерация текста без внешних API и без раскрытия терминов методики.
+    detail: 'Коротко' | 'Стандарт' | 'Подробно'
     """
+    action = sig.get("action", "WAIT")
+    source = sig.get("source", "market")
+    conf_t = _verbal_conf(float(sig.get("confidence", 0.5)))
 
-    action_map = {
-        "BUY": "Покупка",
-        "SHORT": "Шорт (игра на понижение)",
-        "CLOSE": "Закрыть позицию",
-        "WAIT": "Наблюдать (пауза)"
-    }
+    intro = _intro(symbol, action, source, horizon_ui)
+    plan  = _plan(sig)
+    lvl   = _context_levels(sig)
+    tail  = _next_steps(action)
+    conf  = f"Уверенность оценки — {conf_t}."
 
-    action = action_map.get(sig.get("action", ""), sig.get("action", ""))
-
-    # Определяем длину текста в зависимости от детализации
     if detail == "Коротко":
-        sentences_target = 3
+        parts = [f"Сценарий: {_dir_word(action)}.", conf, plan, tail]
     elif detail == "Подробно":
-        sentences_target = 8
-    else:
-        sentences_target = 5
+        nuances = [
+            "Следим за поведением цены в узком коридоре: импульс часто появляется на выходе.",
+            "Риски контролируем через стоп и частичную фиксацию у первой цели.",
+            "Фон рынка учитываем, но решения привязываем к собственным уровням."
+        ]
+        parts = [intro, f"Сценарий: {_dir_word(action)}.", conf, plan, lvl, random.choice(nuances), tail]
+    else:  # Стандарт
+        parts = [intro, f"Сценарий: {_dir_word(action)}.", conf, plan, lvl, tail]
 
-    # Вводная часть
-    intro = f"По тикеру {symbol} на горизонте «{horizon_ui}» вижу сигнал: {action.lower()}."
-    price_zone = (
-        f" Вход предполагается от уровня {sig['entry']:.2f}, "
-        f"цели — {sig['tp1']:.2f} и {sig['tp2']:.2f}, "
-        f"стоп — {sig['sl']:.2f}."
-    )
-
-    # Контекст уровней
-    pivot_info = []
-    if sig.get("R1") and sig.get("S1"):
-        pivot_info.append(
-            f"Сейчас цена находится ближе к {'сопротивлению' if sig['entry'] < sig['R1'] else 'поддержке'}. "
-            f"Ключевые пивот-уровни: R1={sig['R1']:.2f}, R2={sig['R2']:.2f}, R3={sig['R3']:.2f}, "
-            f"S1={sig['S1']:.2f}, S2={sig['S2']:.2f}, S3={sig['S3']:.2f}."
-        )
-
-    # Логика в стиле «интуиции»
-    logic = []
-    if sig["action"] == "BUY":
-        logic.append("Рынок демонстрирует признаки удержания ключевых поддержек и формирования восходящего импульса.")
-        logic.append("Если покупатели смогут закрепиться выше ближайшего сопротивления, есть шанс на ускорение роста.")
-    elif sig["action"] == "SHORT":
-        logic.append("Вижу признаки выдыхания роста и возможного разворота вниз.")
-        logic.append("Закрепление ниже ключевых уровней может открыть дорогу к снижению.")
-    elif sig["action"] == "WAIT":
-        logic.append("Ситуация неоднозначная: лучше дождаться подтверждения направления.")
-    elif sig["action"] == "CLOSE":
-        logic.append("Движение достигло целевых уровней или теряет импульс — разумно зафиксировать результат.")
-
-    # Дополнительные наблюдения
-    extra = []
-    if horizon_ui == "Краткосрок":
-        extra.append("Для краткосрочной сделки важно следить за реакцией на ближайшие уровни в течение 1–3 дней.")
-    elif horizon_ui == "Среднесрок":
-        extra.append("В среднесрочной перспективе ключевым будет пробой или отскок от зон R1/S1.")
-    elif horizon_ui == "Долгосрок":
-        extra.append("В долгосрочном плане важна общая структура тренда и удержание глобальных зон поддержки.")
-
-    # Собираем текст
-    parts = [intro, price_zone] + pivot_info + logic + extra
-    text = " ".join(parts)
-
-    # Если текста мало — слегка расширяем деталями
-    if len(parts) < sentences_target:
-        text += " " + " ".join([
-            "Объём сделок и поведение цены около уровней дадут дополнительные подсказки.",
-            "Стоит учитывать новости и общий фон рынка, чтобы подтвердить сигнал.",
-            "Мой взгляд остаётся гибким: готов скорректировать позицию при изменении динамики."
-        ][:max(0, sentences_target - len(parts))])
-
+    text = " ".join([p for p in parts if p]).replace("  ", " ").strip()
     return text
