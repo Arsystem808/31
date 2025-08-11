@@ -1,77 +1,76 @@
-# core/llm.py — офлайн NLG без GPT
-from __future__ import annotations
-import random
-
-def _verbal_conf(c: float) -> str:
-    if c < 0.45: return "низкая"
-    if c < 0.7:  return "средняя"
-    return "высокая"
-
-def _dir_word(action: str) -> str:
-    return {"BUY":"покупку","SHORT":"шорт","WAIT":"ожидание"}.get(action, "ожидание")
-
-def _ctx_intro(symbol: str, action: str, src: str, horizon_ui: str) -> str:
-    variants = [
-        f"{symbol}: картина аккуратная, без экстремальных скачков. Источник данных — {src.lower()}, горизонт — {horizon_ui.lower()}.",
-        f"{symbol}: рынок ведёт себя ровно; работаем со свежими котировками ({src}). Горизонт — {horizon_ui.lower()}.",
-        f"{symbol}: тон нейтрально-умеренный, без перекосов. Данные: {src.lower()}, режим — {horizon_ui.lower()}."
-    ]
-    # Чуть другой заход, если сигнал не WAIT
-    if action in ("BUY","SHORT"):
-        variants += [
-            f"{symbol}: условия для сделки выглядят адекватно. Используем {src.lower()}, горизонт — {horizon_ui.lower()}.",
-            f"{symbol}: на текущей выборке есть сетап под {_dir_word(action)}. Источник — {src}, горизонт — {horizon_ui.lower()}."
-        ]
-    return random.choice(variants)
-
-def _levels_block(p: dict) -> str:
-    return (f"План: вход {p['entry']}, стоп {p['sl']}, цели {p['tp1']} / {p['tp2']}. "
-            f"Рабочий коридор {p['lower_zone']}–{p['upper_zone']}, опорная отметка {p['key_mark']}.")
-
-def _pivots_block(p: dict) -> str:
-    if all(k in p for k in ("pivot_P","R1","R2","R3","S1","S2","S3")):
-        return (f"Контрольные уровни: P={p['pivot_P']}, R1={p['R1']}, R2={p['R2']}, R3={p['R3']}, "
-                f"S1={p['S1']}, S2={p['S2']}, S3={p['S3']}.")
-    return ""
-
-def _followups(action: str) -> str:
-    if action == "BUY":
-        return "Если цена закрепится выше ближайшего сопротивления — держим курс на вторую цель; при слабой реакции — сокращаем риск."
-    if action == "SHORT":
-        return "Если импульс вниз сохранится у ближайшей поддержки — удерживаем позицию до второй цели; откат — защищаемся."
-    return "Наблюдаем за реакцией у ближайших уровней; чёткий пробой задаст следующую фазу."
-
-def build_rationale(symbol: str, horizon_ui: str, payload: dict, detail: str = "Стандарт") -> str:
+# core/llm.py
+def build_rationale(symbol: str, horizon_ui: str, sig: dict, detail: str = "Стандарт") -> str:
     """
-    Локальная генерация текста без внешних API.
-    detail: 'Коротко' | 'Стандарт' | 'Подробно'
+    Офлайн-генерация текста по сигналу.
+    Без GPT — чисто Python, но со стилистикой "живого" анализа.
     """
-    action = payload.get("action","WAIT")
-    source = payload.get("source","market")
-    conf_t = _verbal_conf(float(payload.get("confidence", 0.5)))
 
-    intro = _ctx_intro(symbol, action, source, horizon_ui)
-    plan  = _levels_block(payload)
-    pivs  = _pivots_block(payload)
-    tail  = _followups(action)
+    action_map = {
+        "BUY": "Покупка",
+        "SHORT": "Шорт (игра на понижение)",
+        "CLOSE": "Закрыть позицию",
+        "WAIT": "Наблюдать (пауза)"
+    }
 
-    # Три уровня детализации
+    action = action_map.get(sig.get("action", ""), sig.get("action", ""))
+
+    # Определяем длину текста в зависимости от детализации
     if detail == "Коротко":
-        parts = [
-            f"Сценарий: {_dir_word(action)}; уверенность {conf_t}.",
-            plan,
-            tail
-        ]
+        sentences_target = 3
     elif detail == "Подробно":
-        nuances = [
-            "По тонусу ленты перекос минимальный: важна реакция на пробой/отбой.",
-            "Риски контролируем через стоп и частичную фиксацию у первой цели.",
-            "Сильные движения часто начинаются после выхода из узкого коридора."
-        ]
-        parts = [intro, f"Сценарий: {_dir_word(action)}; уверенность {conf_t}.", plan, pivs or "", random.choice(nuances), tail]
-    else:  # Стандарт
-        parts = [intro, f"Сценарий: {_dir_word(action)}; уверенность {conf_t}.", plan, pivs or "", tail]
+        sentences_target = 8
+    else:
+        sentences_target = 5
 
-    # Собираем текст, чистим двойные пробелы
-    text = " ".join([s for s in parts if s]).replace("  ", " ").strip()
+    # Вводная часть
+    intro = f"По тикеру {symbol} на горизонте «{horizon_ui}» вижу сигнал: {action.lower()}."
+    price_zone = (
+        f" Вход предполагается от уровня {sig['entry']:.2f}, "
+        f"цели — {sig['tp1']:.2f} и {sig['tp2']:.2f}, "
+        f"стоп — {sig['sl']:.2f}."
+    )
+
+    # Контекст уровней
+    pivot_info = []
+    if sig.get("R1") and sig.get("S1"):
+        pivot_info.append(
+            f"Сейчас цена находится ближе к {'сопротивлению' if sig['entry'] < sig['R1'] else 'поддержке'}. "
+            f"Ключевые пивот-уровни: R1={sig['R1']:.2f}, R2={sig['R2']:.2f}, R3={sig['R3']:.2f}, "
+            f"S1={sig['S1']:.2f}, S2={sig['S2']:.2f}, S3={sig['S3']:.2f}."
+        )
+
+    # Логика в стиле «интуиции»
+    logic = []
+    if sig["action"] == "BUY":
+        logic.append("Рынок демонстрирует признаки удержания ключевых поддержек и формирования восходящего импульса.")
+        logic.append("Если покупатели смогут закрепиться выше ближайшего сопротивления, есть шанс на ускорение роста.")
+    elif sig["action"] == "SHORT":
+        logic.append("Вижу признаки выдыхания роста и возможного разворота вниз.")
+        logic.append("Закрепление ниже ключевых уровней может открыть дорогу к снижению.")
+    elif sig["action"] == "WAIT":
+        logic.append("Ситуация неоднозначная: лучше дождаться подтверждения направления.")
+    elif sig["action"] == "CLOSE":
+        logic.append("Движение достигло целевых уровней или теряет импульс — разумно зафиксировать результат.")
+
+    # Дополнительные наблюдения
+    extra = []
+    if horizon_ui == "Краткосрок":
+        extra.append("Для краткосрочной сделки важно следить за реакцией на ближайшие уровни в течение 1–3 дней.")
+    elif horizon_ui == "Среднесрок":
+        extra.append("В среднесрочной перспективе ключевым будет пробой или отскок от зон R1/S1.")
+    elif horizon_ui == "Долгосрок":
+        extra.append("В долгосрочном плане важна общая структура тренда и удержание глобальных зон поддержки.")
+
+    # Собираем текст
+    parts = [intro, price_zone] + pivot_info + logic + extra
+    text = " ".join(parts)
+
+    # Если текста мало — слегка расширяем деталями
+    if len(parts) < sentences_target:
+        text += " " + " ".join([
+            "Объём сделок и поведение цены около уровней дадут дополнительные подсказки.",
+            "Стоит учитывать новости и общий фон рынка, чтобы подтвердить сигнал.",
+            "Мой взгляд остаётся гибким: готов скорректировать позицию при изменении динамики."
+        ][:max(0, sentences_target - len(parts))])
+
     return text
