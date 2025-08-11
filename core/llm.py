@@ -1,55 +1,77 @@
+# core/llm.py — офлайн NLG без GPT
 from __future__ import annotations
-import os, json, random
+import random
 
-def _human_fallback(symbol: str, horizon_ui: str, p: dict, detail: str) -> str:
-    chunks = [
-        f"{symbol}: динамика спокойная, без резких выбросов.",
-        f"Опорная отметка {p['key_mark']}, рабочий коридор {p['lower_zone']}–{p['upper_zone']}.",
-        f"План: вход {p['entry']}, стоп {p['sl']}, цели {p['tp1']} / {p['tp2']}.",
-        f"Уверенность оценки — {('низкая' if p['confidence']<0.45 else 'средняя' if p['confidence']<0.7 else 'высокая')}.",
-        "Следим за реакцией у ближайших уровней: откат — защищаем позицию, пробой — держим цели."
+def _verbal_conf(c: float) -> str:
+    if c < 0.45: return "низкая"
+    if c < 0.7:  return "средняя"
+    return "высокая"
+
+def _dir_word(action: str) -> str:
+    return {"BUY":"покупку","SHORT":"шорт","WAIT":"ожидание"}.get(action, "ожидание")
+
+def _ctx_intro(symbol: str, action: str, src: str, horizon_ui: str) -> str:
+    variants = [
+        f"{symbol}: картина аккуратная, без экстремальных скачков. Источник данных — {src.lower()}, горизонт — {horizon_ui.lower()}.",
+        f"{symbol}: рынок ведёт себя ровно; работаем со свежими котировками ({src}). Горизонт — {horizon_ui.lower()}.",
+        f"{symbol}: тон нейтрально-умеренный, без перекосов. Данные: {src.lower()}, режим — {horizon_ui.lower()}."
     ]
-    random.shuffle(chunks)
-    n = 3 if detail == "Коротко" else (4 if detail == "Стандарт" else 5)
-    return " ".join(chunks[:n])
+    # Чуть другой заход, если сигнал не WAIT
+    if action in ("BUY","SHORT"):
+        variants += [
+            f"{symbol}: условия для сделки выглядят адекватно. Используем {src.lower()}, горизонт — {horizon_ui.lower()}.",
+            f"{symbol}: на текущей выборке есть сетап под {_dir_word(action)}. Источник — {src}, горизонт — {horizon_ui.lower()}."
+        ]
+    return random.choice(variants)
+
+def _levels_block(p: dict) -> str:
+    return (f"План: вход {p['entry']}, стоп {p['sl']}, цели {p['tp1']} / {p['tp2']}. "
+            f"Рабочий коридор {p['lower_zone']}–{p['upper_zone']}, опорная отметка {p['key_mark']}.")
+
+def _pivots_block(p: dict) -> str:
+    if all(k in p for k in ("pivot_P","R1","R2","R3","S1","S2","S3")):
+        return (f"Контрольные уровни: P={p['pivot_P']}, R1={p['R1']}, R2={p['R2']}, R3={p['R3']}, "
+                f"S1={p['S1']}, S2={p['S2']}, S3={p['S3']}.")
+    return ""
+
+def _followups(action: str) -> str:
+    if action == "BUY":
+        return "Если цена закрепится выше ближайшего сопротивления — держим курс на вторую цель; при слабой реакции — сокращаем риск."
+    if action == "SHORT":
+        return "Если импульс вниз сохранится у ближайшей поддержки — удерживаем позицию до второй цели; откат — защищаемся."
+    return "Наблюдаем за реакцией у ближайших уровней; чёткий пробой задаст следующую фазу."
 
 def build_rationale(symbol: str, horizon_ui: str, payload: dict, detail: str = "Стандарт") -> str:
     """
+    Локальная генерация текста без внешних API.
     detail: 'Коротко' | 'Стандарт' | 'Подробно'
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    action = payload.get("action","WAIT")
+    source = payload.get("source","market")
+    conf_t = _verbal_conf(float(payload.get("confidence", 0.5)))
 
-    word_goal = {"Коротко":"3–4", "Стандарт":"4–6", "Подробно":"6–9"}[detail]
-    prompt = f"""
-Собери {word_goal} предложений живого разбора для инвестора. Без жаргона и индикаторов в лоб.
-Тикер: {symbol}
-Горизонт: {horizon_ui}
-Подсказки (не зачитывай их): {json.dumps(payload, ensure_ascii=False)}
-Сделай структуру: контекст движения → ключевые уровни (ключевая отметка и рабочий коридор) →
-план с Entry/SL/TP1/TP2 → что считаем сигналом отмены → что внимательно отслеживать дальше.
-Избегай слов RSI/MACD/pivot. Тон спокойный, уверенный, без обещаний доходности.
-"""
+    intro = _ctx_intro(symbol, action, source, horizon_ui)
+    plan  = _levels_block(payload)
+    pivs  = _pivots_block(payload)
+    tail  = _followups(action)
 
-    if api_key:
-        try:
-            from openai import OpenAI
-            client = OpenAI(api_key=api_key)
-            rsp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role":"system","content":"Ты рыночный аналитик. Объясняешь просто и по делу."},
-                    {"role":"user","content":prompt},
-                ],
-                temperature=0.6 if detail!="Подробно" else 0.7,
-                max_tokens=360 if detail=="Подробно" else 260,
-            )
-            text = rsp.choices[0].message.content.strip()
-            if text:
-                return text
-        except Exception:
-            pass
+    # Три уровня детализации
+    if detail == "Коротко":
+        parts = [
+            f"Сценарий: {_dir_word(action)}; уверенность {conf_t}.",
+            plan,
+            tail
+        ]
+    elif detail == "Подробно":
+        nuances = [
+            "По тонусу ленты перекос минимальный: важна реакция на пробой/отбой.",
+            "Риски контролируем через стоп и частичную фиксацию у первой цели.",
+            "Сильные движения часто начинаются после выхода из узкого коридора."
+        ]
+        parts = [intro, f"Сценарий: {_dir_word(action)}; уверенность {conf_t}.", plan, pivs or "", random.choice(nuances), tail]
+    else:  # Стандарт
+        parts = [intro, f"Сценарий: {_dir_word(action)}; уверенность {conf_t}.", plan, pivs or "", tail]
 
-    # Fallback, если ключа нет или запрос упал
-    return _human_fallback(symbol, horizon_ui, payload, detail)
-
+    # Собираем текст, чистим двойные пробелы
+    text = " ".join([s for s in parts if s]).replace("  ", " ").strip()
+    return text
