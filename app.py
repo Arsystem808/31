@@ -10,12 +10,12 @@ sys.path.append(str(BASE))  # чтобы видеть пакет core/
 
 from core.data_loader import DataLoader
 from core.strategy import compute_signal
-from core.llm import build_rationale
+from core.llm import build_rationale  # локальный офлайн NLG (без GPT)
 
 # --- UI ---
 st.set_page_config(page_title="AI Trading — Final App", layout="wide")
 st.title("AI Trading — Final App")
-st.caption("Данные: Polygon → Yahoo → CSV. Стратегия: кастом. LLM-анализ — с выбором детализации.")
+st.caption("Данные: Polygon → Yahoo → CSV. Стратегия: кастом. Описание — офлайн (без GPT) с выбором детализации.")
 
 # Настройки тикеров и горизонта
 default_tickers = os.getenv("DEFAULT_TICKERS", "QQQ,AAPL,MSFT,NVDA")
@@ -50,7 +50,14 @@ with colA:
             fetched = loader.history(symbol, period="6mo", interval="1d")
             st.session_state["source"] = fetched.source
             st.session_state["df"] = fetched.df
-            st.session_state["signal"] = compute_signal(fetched.df, symbol, horizon)
+
+            # расчёт сигнала
+            sig = compute_signal(fetched.df, symbol, horizon)
+
+            # добавим источник в сигнал — офлайн-описание использует его в тексте
+            sig["source"] = fetched.source
+
+            st.session_state["signal"] = sig
         except Exception as e:
             st.error(str(e))
 
@@ -93,12 +100,11 @@ with colB:
             )
         ])
 
-        # Линии уровней
+        # Линии уровней (включая пивоты, если есть)
         lines = {
             "Entry": sig["entry"], "TP1": sig["tp1"], "TP2": sig["tp2"], "SL": sig["sl"],
             "Ключевая отметка": sig["key_mark"],
             "Верхняя зона": sig["upper_zone"], "Нижняя зона": sig["lower_zone"],
-            # Пивоты (если есть в сигнале)
             "P": sig.get("pivot_P", None), "R1": sig.get("R1", None), "R2": sig.get("R2", None), "R3": sig.get("R3", None),
             "S1": sig.get("S1", None), "S2": sig.get("S2", None), "S3": sig.get("S3", None)
         }
@@ -108,7 +114,6 @@ with colB:
             "P":"#9ca3af","R1":"#a78bfa","R2":"#a78bfa","R3":"#a78bfa",
             "S1":"#f472b6","S2":"#f472b6","S3":"#f472b6"
         }
-
         for label, y in lines.items():
             if y is None: 
                 continue
@@ -118,7 +123,7 @@ with colB:
                 annotation_text=label, annotation_position="top left"
             )
 
-        # Подсветка TP и SL зон
+        # Подсветка TP / SL зон
         try:
             x0 = df["Date"].iloc[-min(len(df), 40)]
             x1 = df["Date"].iloc[-1]
@@ -136,7 +141,7 @@ with colB:
         fig.update_layout(margin=dict(l=10,r=10,t=30,b=10), height=460, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
-        # --- Текстовая аналитика (LLM) с учётом детализации ---
+        # --- Текстовая аналитика (офлайн) ---
         text = build_rationale(sig["symbol"], horizon_ui, sig, detail=detail)
         st.write(text)
 
@@ -144,3 +149,5 @@ with colB:
             st.dataframe(df.tail(12))
     else:
         st.info("Нажмите «Сгенерировать сигнал». Если Polygon/Yahoo недоступны — возьмём demo CSV.")
+
+    
